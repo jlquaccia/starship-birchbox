@@ -1,0 +1,80 @@
+version: 2
+jobs:
+  build:
+    branches:
+      only:
+        - master
+        - qa
+        - development
+    docker:
+      - image: circleci/node:12
+    working_directory: ~/ce-deploy
+    # The deployment procedure
+    # Inside of the CIRCLE_CI web settings you can set some secrete ENV variables-
+    # AWS_SECRET_ACCESS_KEY and AWS_ACCESS_KEY_ID must be set here.
+    # The following are set by ci-config.sh: AWS_BUCKET_TARGET, AWS_BACKUP_BUCKET, CIRCLE_BRANCH
+    steps:
+      # STEP 1: Set some git info used for commiting the build
+      - run:
+          name: 'Git Build/Release Config'
+          command: |
+            git config --global user.email 'automated-release@ampush.com'
+            git config --global user.name 'Automated Release CI'
+      # STEP 2: checkout the sub-module the TARGET
+      #         Also dumps the sub-module specific env variables (located in ci-config)
+      #         (TODO:change ^^this^^ to a more standard .env file)
+      - checkout:
+          path: ~/ce-deploy/$CIRCLE_PROJECT_REPONAME
+      - run:
+          name: 'Install Core Deps'
+          command: |
+            cd ~/ce-deploy/$CIRCLE_PROJECT_REPONAME
+            bash .circleci/ci-config.sh
+            yarn install
+      # STEP 3: Checkout and Install STARFORGE
+      - run:
+          name: 'Clone and Install Starforge'
+          command: |
+            git clone git@github.com:ampush/starforge.git starforge
+            cd ~/ce-deploy/starforge
+            yarn install
+      # STEP 3: Set some env variables for the build/deploy procedure
+      # These get used in the scripts
+      - run:
+          name: 'ENV Variables'
+          command: |
+            echo -- CIRCLE_PROJECT_REPONAME = $CIRCLE_PROJECT_REPONAME
+            echo -- AWS_SECRET_ACCESS_KEY   = $AWS_SECRET_ACCESS_KEY
+            echo -- AWS_ACCESS_KEY_ID       = $AWS_ACCESS_KEY_ID
+            echo -- AWS_BUCKET_TARGET       = $AWS_BUCKET_TARGET
+            echo -- AWS_BACKUP_BUCKET       = $AWS_BACKUP_BUCKET
+            echo -- AWS_CLOUDFRONT          = $AWS_CLOUDFRONT
+            echo -- CIRCLE_BRANCH           = $CIRCLE_BRANCH
+            git config user.email
+            git config user.name
+      # STEP 4: Build the site-data folders
+      - run:
+          name: 'Build Template Data'
+          command: |
+            echo BUILDING
+            cd ~/ce-deploy/starforge
+            yarn run iter:build $CIRCLE_PROJECT_REPONAME
+            cp -ar ~/ce-deploy/$CIRCLE_PROJECT_REPONAME/builds ../builds
+      # STEP 4.5: Save the artifacts; cause, why not?
+      - store_artifacts:
+          path: ~/ce-deploy/builds
+      # STEP 5: Commit the build, to keep S3 and the git repo in sync
+      # IMPORTANT!!!!! MAKE SURE CI SKIPS THE NEXT git change, otherwise, recursive CI cycle, lul
+      - run:
+          name: 'Commit Build to Submodule'
+          command: |
+            cd ~/ce-deploy/$CIRCLE_PROJECT_REPONAME
+            git add ./
+            git commit -am "release: automated build [skip ci]"
+            git push
+      # STEP 6: Deploy the build to S3
+      - run:
+          name: 'Deploy Templates'
+          command: |
+            cd ~/ce-deploy/starforge
+            yarn run s3:deploy ~/ce-deploy/$CIRCLE_PROJECT_REPONAME/builds -t $AWS_BUCKET_TARGET
